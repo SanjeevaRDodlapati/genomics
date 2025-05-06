@@ -203,7 +203,7 @@ def main(group, thr, limit):
     pred1_path = f'/scratch/ml-csm/projects/fgenom/gve/output/kmeans/pred1/aggr/{group}/'
     pred1_files = os.listdir(pred1_path)
     
-    inPath = f'/home/sdodl001/Desktop/DNA_Methylation_Scripts/cpg_util_scripts/data/kmeans/uncert_gve_dir_preds/{group}/pred200/thr{thr}/'
+    inPath = f'/home/sdodl001/Desktop/DNA_Methylation_Scripts/cpg_util_scripts/data/kmeans/uncert_gve_direction/{group}/pred200/'
     files = os.listdir(inPath)
     
     # Find the common set of cells from both directories

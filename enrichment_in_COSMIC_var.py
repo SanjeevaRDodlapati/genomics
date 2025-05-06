@@ -106,7 +106,7 @@ def read_uncert_data(input_dir: str, cell: str):
     return df_cert, df_uncert
 
 
-def get_clinvar_enrich(cells, pred1_path, inPath, level, row_labels, cosmic_df, thr):
+def get_var_enrich(cells, pred1_path, inPath, level, row_labels, cosmic_df, thr):
     """
     Computes enrichment by merging prediction data with COSMIC noncoding variant data.
 
@@ -207,7 +207,7 @@ def main(group, thr, limit):
     pred1_path = f'/scratch/ml-csm/projects/fgenom/gve/output/kmeans/pred1/aggr/{group}/'
     pred1_files = os.listdir(pred1_path)
     
-    inPath = f'/home/sdodl001/Desktop/DNA_Methylation_Scripts/cpg_util_scripts/data/kmeans/uncert_gve_dir_preds/{group}/pred200/thr{thr}/'
+    inPath = f'/home/sdodl001/Desktop/DNA_Methylation_Scripts/cpg_util_scripts/data/kmeans/uncert_gve_direction/{group}/pred200/'
     files = os.listdir(inPath)
     
     # Find the common set of cells from both directories
@@ -227,11 +227,11 @@ def main(group, thr, limit):
     level = '_highCert'
     
     # Calculate COSMIC enrichment
-    enrich_df = get_clinvar_enrich(cells, pred1_path, inPath, level, row_labels, cosmic_df, thr)
+    enrich_df = get_var_enrich(cells, pred1_path, inPath, level, row_labels, cosmic_df, thr)
     
     # Save the enrichment DataFrame to a CSV file
     output_csv = f'/home/sdodl001/Desktop/DNA_Methylation_Scripts/cpg_util_scripts/GVE_peak/data/enrich_ana/group{group}_COSMIC_enrich.csv'
-    enrich_df.to_csv(output_csv, index=False)
+    enrich_df.to_csv(output_csv)
     print('Done! Results saved to', output_csv)
 
 
