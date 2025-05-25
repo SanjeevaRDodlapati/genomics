@@ -1,362 +1,346 @@
 """
-Visualization and interpretability tools for genomic deep learning models.
+Visualization tools for genomic deep learning models.
+
+This module provides tools for visualizing motifs learned by genomic deep learning models,
+including convolutional filters that may correspond to transcription factor binding sites.
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
-from typing import List, Dict, Union, Tuple, Optional, Any
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from captum.attr import (
-    IntegratedGradients,
-    DeepLift,
-    GradientShap,
-    Occlusion,
-    NoiseTunnel,
-    visualization
-)
+import seaborn as sns
+from typing import List, Dict, Union, Tuple, Optional
+import logomaker
 
 
 class MotifVisualizer:
     """
-    Visualization tool for extracting and plotting sequence motifs.
+    Class for visualizing motifs learned by genomic deep learning models.
     """
     
-    def __init__(self, model: nn.Module, device: str = "cuda"):
+    def __init__(self, model: nn.Module, layer_name: Optional[str] = None):
         """
         Initialize the motif visualizer.
         
         Args:
-            model: PyTorch model
-            device: Device to run computations on
+            model: The PyTorch model to visualize
+            layer_name: Optional name of the convolutional layer to visualize.
+                        If None, will attempt to find the first convolutional layer.
         """
-        self.model = model.to(device)
-        self.device = device
+        self.model = model
+        self.layer_name = layer_name
+        self._conv_layer = self._get_conv_layer()
         
-        # Setup attribution methods
-        self.integrated_gradients = IntegratedGradients(self.model)
-        self.deep_lift = DeepLift(self.model)
-        self.gradient_shap = GradientShap(self.model)
-        self.occlusion = Occlusion(self.model)
-        
-    def get_integrated_gradients(
-        self, 
-        input_seqs: torch.Tensor, 
-        target_class: int,
-        n_steps: int = 50,
-        internal_batch_size: int = 4
-    ) -> np.ndarray:
+    def _get_conv_layer(self) -> nn.Conv1d:
         """
-        Calculate integrated gradients attribution for input sequences.
+        Get the convolutional layer to visualize.
         
-        Args:
-            input_seqs: Input sequences [batch_size, n_features, seq_length]
-            target_class: Target class index
-            n_steps: Number of steps for path integral
-            internal_batch_size: Batch size for attribution calculation
-            
         Returns:
-            Attribution scores
+            The convolutional layer of interest.
         """
-        input_seqs = input_seqs.to(self.device)
-        
-        # Create baseline of all zeros
-        baseline = torch.zeros_like(input_seqs).to(self.device)
-        
-        # Calculate attributions
-        attributions = self.integrated_gradients.attribute(
-            input_seqs,
-            baselines=baseline,
-            target=target_class,
-            n_steps=n_steps,
-            internal_batch_size=internal_batch_size
-        )
-        
-        return attributions.cpu().detach().numpy()
-    
-    def get_deep_lift_attributions(
-        self, 
-        input_seqs: torch.Tensor, 
-        target_class: int
-    ) -> np.ndarray:
-        """
-        Calculate DeepLIFT attributions for input sequences.
-        
-        Args:
-            input_seqs: Input sequences [batch_size, n_features, seq_length]
-            target_class: Target class index
+        if self.layer_name is not None:
+            for name, module in self.model.named_modules():
+                if name == self.layer_name and isinstance(module, nn.Conv1d):
+                    return module
             
-        Returns:
-            Attribution scores
-        """
-        input_seqs = input_seqs.to(self.device)
+            raise ValueError(f"Could not find convolutional layer named {self.layer_name}")
         
-        # Create baseline of all zeros
-        baseline = torch.zeros_like(input_seqs).to(self.device)
-        
-        # Calculate attributions
-        attributions = self.deep_lift.attribute(
-            input_seqs,
-            baselines=baseline,
-            target=target_class
-        )
-        
-        return attributions.cpu().detach().numpy()
-        
-    def visualize_sequence_attribution(
-        self,
-        input_seq: Union[torch.Tensor, np.ndarray],
-        attributions: Union[torch.Tensor, np.ndarray],
-        method_name: str = "Integrated Gradients",
-        figsize: Tuple[int, int] = (20, 4),
-        show_nucleotide_names: bool = True
-    ) -> plt.Figure:
-        """
-        Visualize attribution scores for a sequence.
-        
-        Args:
-            input_seq: Input sequence [n_features, seq_length]
-            attributions: Attribution scores [n_features, seq_length]
-            method_name: Name of the attribution method
-            figsize: Figure size
-            show_nucleotide_names: Whether to show nucleotide names (A, C, G, T)
-            
-        Returns:
-            Matplotlib figure
-        """
-        if isinstance(input_seq, torch.Tensor):
-            input_seq = input_seq.cpu().detach().numpy()
-            
-        if isinstance(attributions, torch.Tensor):
-            attributions = attributions.cpu().detach().numpy()
-            
-        # Make sure both are 2D
-        if input_seq.ndim > 2:
-            input_seq = input_seq[0]  # Take first sequence in batch
-            
-        if attributions.ndim > 2:
-            attributions = attributions[0]  # Take first attribution in batch
-            
-        # Convert to correct shape if needed
-        if input_seq.shape[0] == 4 and input_seq.shape[1] > 4:
-            # Shape is already [4, seq_length]
-            pass
-        elif input_seq.shape[0] > 4 and input_seq.shape[1] == 4:
-            # Shape is [seq_length, 4], transpose
-            input_seq = input_seq.T
-            attributions = attributions.T
-            
-        seq_length = input_seq.shape[1]
-        nucleotides = ['A', 'C', 'G', 'T']
-        
-        # Create figure
-        fig, ax = plt.subplots(figsize=figsize)
-        
-        # Create position indices
-        positions = np.arange(seq_length)
-        
-        # Create heatmap of attributions
-        im = ax.imshow(attributions, cmap='RdBu_r', aspect='auto', 
-                       vmin=-np.abs(attributions).max(), vmax=np.abs(attributions).max())
-        
-        # Add colorbar
-        cbar = plt.colorbar(im, ax=ax)
-        cbar.set_label('Attribution Score')
-        
-        # Set labels
-        ax.set_title(f"{method_name} Attribution")
-        ax.set_xlabel("Sequence Position")
-        
-        # Set y-tick labels to nucleotides if requested
-        if show_nucleotide_names:
-            ax.set_yticks(np.arange(4))
-            ax.set_yticklabels(nucleotides)
-        else:
-            ax.set_ylabel("Feature Index")
-            
-        # Mark the actual nucleotide at each position
-        for pos in range(seq_length):
-            nuc_idx = np.argmax(input_seq[:, pos])
-            ax.text(pos, nuc_idx, nucleotides[nuc_idx], 
-                   ha='center', va='center', color='black')
-        
-        # Adjust layout
-        plt.tight_layout()
-        
-        return fig
-    
-    def extract_motifs(
-        self, 
-        model: nn.Module,
-        layer_idx: int,
-        filter_indices: Optional[List[int]] = None,
-        window_size: int = 15
-    ) -> Dict[int, np.ndarray]:
-        """
-        Extract motif representations from convolutional filters.
-        
-        Args:
-            model: The model to extract motifs from
-            layer_idx: Index of convolutional layer
-            filter_indices: Specific filter indices to extract (None for all)
-            window_size: Size of sequence window for motifs
-            
-        Returns:
-            Dictionary mapping filter indices to motif matrices
-        """
-        # Get the convolutional layer
-        conv_layers = [module for module in model.modules() 
-                       if isinstance(module, nn.Conv1d)]
-        
-        if layer_idx >= len(conv_layers):
-            raise ValueError(f"Layer index {layer_idx} out of range. "
-                            f"Model has {len(conv_layers)} convolutional layers.")
-        
-        conv_layer = conv_layers[layer_idx]
-        
-        # Extract weights
-        weights = conv_layer.weight.data.cpu().numpy()
-        
-        # Determine which filters to process
-        if filter_indices is None:
-            filter_indices = list(range(weights.shape[0]))
-            
-        # Extract motifs for each filter
-        motifs = {}
-        
-        for filter_idx in filter_indices:
-            if filter_idx >= weights.shape[0]:
-                continue
+        # If layer_name is None, find the first convolutional layer
+        for module in self.model.modules():
+            if isinstance(module, nn.Conv1d):
+                return module
                 
-            # Get filter weights
-            filter_weights = weights[filter_idx]  # shape: [in_channels, kernel_size]
-            
-            # Convert to position weight matrix
-            pwm = filter_weights
-            
-            # Normalize to create probability matrix
-            pwm = pwm - pwm.min(axis=0)
-            row_sums = pwm.sum(axis=0)
-            row_sums[row_sums == 0] = 1  # Avoid division by zero
-            pwm = pwm / row_sums
-            
-            motifs[filter_idx] = pwm
-            
-        return motifs
-    
-    def plot_sequence_logo(
-        self,
-        pwm: np.ndarray,
-        figsize: Tuple[int, int] = (10, 3),
-        title: str = "Sequence Logo"
-    ) -> plt.Figure:
+        raise ValueError("Could not find any convolutional layer in the model")
+
+    def get_filters(self) -> torch.Tensor:
         """
-        Plot a sequence logo from a position weight matrix.
+        Extract convolutional filters from the model.
+        
+        Returns:
+            Tensor of shape [num_filters, 4, filter_length] for genomic models
+        """
+        weights = self._conv_layer.weight.data
+        
+        # Check if in genomic format (num_filters, 4, filter_length)
+        if weights.shape[1] != 4:
+            raise ValueError(f"Expected 4 input channels for genomic data, got {weights.shape[1]}")
+            
+        return weights
+    
+    def plot_filter(self, filter_idx: int, figsize: Tuple[int, int] = (10, 2)) -> plt.Figure:
+        """
+        Plot a single filter as a sequence logo.
         
         Args:
-            pwm: Position weight matrix [4, motif_length]
-            figsize: Figure size
-            title: Plot title
+            filter_idx: Index of the filter to plot
+            figsize: Size of the figure (width, height)
             
         Returns:
-            Matplotlib figure
+            The matplotlib figure object
         """
-        # Ensure correct shape
-        if pwm.shape[0] != 4:
-            pwm = pwm.T
-            
-        motif_length = pwm.shape[1]
-        nucleotides = ['A', 'C', 'G', 'T']
+        filters = self.get_filters()
         
-        # Calculate information content
-        # Add small epsilon to avoid log(0)
-        epsilon = 1e-7
-        pwm_norm = pwm + epsilon
-        pwm_norm = pwm_norm / pwm_norm.sum(axis=0)
+        if filter_idx >= filters.shape[0]:
+            raise ValueError(f"Filter index {filter_idx} out of range (0-{filters.shape[0]-1})")
         
-        # Information content = 2 - entropy
-        entropy = -np.sum(pwm_norm * np.log2(pwm_norm), axis=0)
-        info_content = 2 - entropy
+        # Get the single filter and convert to PWM format
+        filt = filters[filter_idx].cpu().numpy()
         
-        # Create figure
+        # ACGT to match standard genomic convention
+        bases = ['A', 'C', 'G', 'T']
+        
+        # Create dataframe for logomaker
+        pwm_df = self._convert_filter_to_pwm(filt)
+        
+        # Create figure and plot logo
         fig, ax = plt.subplots(figsize=figsize)
+        logo = logomaker.Logo(pwm_df, ax=ax)
         
-        # Plot stacked logo
-        y_base = np.zeros(motif_length)
-        max_height = 0
-        
-        for i, nuc in enumerate(nucleotides):
-            # Height is proportional to probability × information content
-            heights = pwm_norm[i] * info_content
-            
-            # Different colors for each nucleotide
-            color = {'A': 'green', 'C': 'blue', 'G': 'orange', 'T': 'red'}[nuc]
-            
-            # Plot bars
-            ax.bar(np.arange(motif_length), heights, bottom=y_base, 
-                  width=0.8, color=color, label=nuc, align='center')
-            
-            # Update baseline for stacking
-            y_base = y_base + heights
-            max_height = max(max_height, y_base.max())
-        
-        # Set axis labels and title
+        # Customize the plot
+        ax.set_title(f"Filter {filter_idx}")
+        ax.set_ylabel("Information Content")
         ax.set_xlabel("Position")
-        ax.set_ylabel("Information Content (bits)")
-        ax.set_title(title)
-        ax.set_xlim(-0.5, motif_length - 0.5)
-        ax.set_ylim(0, max(2, max_height * 1.1))  # Set y-limit to 2 bits or higher
         
-        # Add legend
-        ax.legend(loc='upper right')
+        return fig
+    
+    def _convert_filter_to_pwm(self, filt: np.ndarray) -> pd.DataFrame:
+        """
+        Convert a convolutional filter to position weight matrix format for logomaker.
+        
+        Args:
+            filt: Filter of shape [4, filter_length]
+            
+        Returns:
+            Pandas DataFrame in logomaker format
+        """
+        # ACGT to match standard genomic convention
+        bases = ['A', 'C', 'G', 'T']
+        
+        # Convert filter values to information content
+        # Shift by min value and normalize
+        norm_filt = filt - filt.min(axis=0, keepdims=True)
+        
+        # Avoid division by zero
+        sum_per_pos = norm_filt.sum(axis=0, keepdims=True)
+        sum_per_pos[sum_per_pos == 0] = 1.0
+        
+        pwm = norm_filt / sum_per_pos
+        
+        # Create dataframe for logomaker
+        pwm_df = pd.DataFrame(pwm.T, columns=bases)
+        
+        return pwm_df
+    
+    def plot_all_filters(self, 
+                          n_cols: int = 4, 
+                          figsize_per_filter: Tuple[int, int] = (5, 2),
+                          max_filters: Optional[int] = None) -> plt.Figure:
+        """
+        Plot all filters as sequence logos in a grid.
+        
+        Args:
+            n_cols: Number of columns in the grid
+            figsize_per_filter: Size of each individual filter plot (width, height)
+            max_filters: Maximum number of filters to plot. If None, plot all.
+            
+        Returns:
+            The matplotlib figure object
+        """
+        filters = self.get_filters()
+        n_filters = filters.shape[0]
+        
+        if max_filters is not None:
+            n_filters = min(n_filters, max_filters)
+        
+        n_rows = (n_filters + n_cols - 1) // n_cols
+        
+        fig_width = n_cols * figsize_per_filter[0]
+        fig_height = n_rows * figsize_per_filter[1]
+        
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_width, fig_height))
+        
+        # Convert axes to flat array for easier indexing
+        if n_rows > 1 and n_cols > 1:
+            axes_flat = axes.flatten()
+        elif n_rows == 1 and n_cols > 1:
+            axes_flat = axes
+        elif n_cols == 1 and n_rows > 1:
+            axes_flat = axes
+        else:
+            axes_flat = [axes]
+        
+        # Plot each filter
+        for i in range(n_filters):
+            # Get the PWM for this filter
+            filt = filters[i].cpu().numpy()
+            pwm_df = self._convert_filter_to_pwm(filt)
+            
+            # Create logo in the appropriate subplot
+            logo = logomaker.Logo(pwm_df, ax=axes_flat[i])
+            
+            # Customize the plot
+            axes_flat[i].set_title(f"Filter {i}")
+            
+            # Only set y-label for leftmost plots
+            if i % n_cols == 0:
+                axes_flat[i].set_ylabel("Information Content")
+            else:
+                axes_flat[i].set_ylabel("")
+                
+            # Only set x-label for bottom plots
+            if i >= n_filters - n_cols:
+                axes_flat[i].set_xlabel("Position")
+            else:
+                axes_flat[i].set_xlabel("")
+        
+        # Hide empty subplots
+        for i in range(n_filters, len(axes_flat)):
+            axes_flat[i].axis('off')
         
         plt.tight_layout()
         return fig
     
-    def save_filter_logos(
-        self,
-        model: nn.Module,
-        layer_idx: int = 0,
-        output_dir: str = "motif_logos",
-        top_k_filters: Optional[int] = None
-    ) -> None:
-        """
-        Extract and save sequence logos for convolutional filters.
+    
+def plot_filter_activations(activations: torch.Tensor, 
+                           sequence: Optional[str] = None,
+                           top_k: int = 5,
+                           figsize: Tuple[int, int] = (12, 6)) -> plt.Figure:
+    """
+    Plot the activations of convolutional filters across a sequence.
+    
+    Args:
+        activations: Activation tensor of shape [1, n_filters, seq_length]
+        sequence: Optional DNA sequence string to display below the plot
+        top_k: Number of top filters to highlight
+        figsize: Figure size (width, height)
         
-        Args:
-            model: The model to extract motifs from
-            layer_idx: Index of convolutional layer
-            output_dir: Directory to save plots
-            top_k_filters: Number of top filters to plot (None for all)
-        """
-        import os
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # Extract motifs
-        motifs = self.extract_motifs(model, layer_idx)
-        
-        # If top_k is specified, select filters with highest max activation
-        if top_k_filters is not None and top_k_filters < len(motifs):
-            # Calculate max activation for each filter
-            max_activations = {idx: np.max(np.abs(motif)) for idx, motif in motifs.items()}
+    Returns:
+        The matplotlib figure object
+    """
+    # Ensure activations is the right shape
+    if len(activations.shape) != 3:
+        raise ValueError(f"Expected activations of shape [1, n_filters, seq_length], got {activations.shape}")
+    
+    # Get the dimensions
+    n_filters = activations.shape[1]
+    seq_length = activations.shape[2]
+    
+    # Convert to numpy
+    act = activations[0].cpu().numpy()  # Shape: [n_filters, seq_length]
+    
+    # Find the top-k filters by maximum activation
+    max_act_per_filter = np.max(act, axis=1)
+    top_filters = np.argsort(max_act_per_filter)[-top_k:]
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    # Plot heatmap of all activations
+    sns.heatmap(act, cmap='viridis', ax=ax)
+    
+    # Highlight the top-k filters
+    for i, filt_idx in enumerate(top_filters):
+        ax.axhline(y=filt_idx + 0.5, color='red', linestyle='-', linewidth=1, alpha=0.7)
+        ax.text(-5, filt_idx + 0.5, f"Filter {filt_idx}", 
+                va='center', ha='right', color='red', fontweight='bold')
+    
+    # If sequence provided, show it on x-axis
+    if sequence is not None:
+        if len(sequence) != seq_length:
+            print(f"Warning: Sequence length ({len(sequence)}) does not match activation length ({seq_length})")
+            sequence = sequence[:seq_length]
             
-            # Sort by activation and take top-k
-            top_filters = sorted(max_activations.keys(), 
-                                key=lambda idx: max_activations[idx], 
-                                reverse=True)[:top_k_filters]
-            
-            # Filter motifs to only include top filters
-            motifs = {idx: motifs[idx] for idx in top_filters}
+        # Replace x-tick labels with sequence
+        ax.set_xticks(np.arange(0.5, len(sequence) + 0.5))
+        ax.set_xticklabels(list(sequence), fontsize=8, rotation=0)
         
-        # Generate and save plots
-        for filter_idx, motif in motifs.items():
-            fig = self.plot_sequence_logo(
-                motif,
-                title=f"Filter {filter_idx} Sequence Logo"
-            )
+    ax.set_ylabel("Filter")
+    ax.set_xlabel("Position")
+    ax.set_title("Filter Activations Across Sequence")
+        
+    plt.tight_layout()
+    return fig
+
+
+def get_activated_motifs(model: nn.Module, 
+                        sequences: torch.Tensor, 
+                        layer_name: Optional[str] = None,
+                        threshold: float = 0.5,
+                        return_scores: bool = False) -> Union[List[List[str]], Tuple[List[List[str]], List[List[float]]]]:
+    """
+    Extract DNA subsequences that activate specific filters in the model.
+    
+    Args:
+        model: The PyTorch model to analyze
+        sequences: Tensor of one-hot encoded DNA sequences [batch, 4, seq_length]
+        layer_name: Name of the convolutional layer to analyze
+        threshold: Activation threshold for considering a motif
+        return_scores: Whether to return activation scores along with motifs
+        
+    Returns:
+        If return_scores is False: List of lists of motif sequences per filter
+        If return_scores is True: Tuple of (motif_sequences, activation_scores)
+    """
+    # Create a hook to get intermediate activations
+    activations = {}
+    
+    def get_activation(name):
+        def hook(model, input, output):
+            activations[name] = output.detach()
+        return hook
+    
+    # Register the hook
+    visualizer = MotifVisualizer(model, layer_name)
+    conv_layer = visualizer._conv_layer
+    handle = conv_layer.register_forward_hook(get_activation('conv'))
+    
+    # Run the model to get activations
+    with torch.no_grad():
+        _ = model(sequences)
+        
+    # Get the activations and remove hook
+    act = activations['conv']  # Shape: [batch, n_filters, seq_length]
+    handle.remove()
+    
+    # Get filter details
+    filters = visualizer.get_filters()
+    n_filters = filters.shape[0]
+    filter_length = filters.shape[2]
+    
+    # Convert one-hot sequences back to ACGT
+    bases = ['A', 'C', 'G', 'T']
+    sequence_strings = []
+    
+    for seq in sequences:
+        seq_np = seq.cpu().numpy()
+        seq_str = ""
+        for i in range(seq_np.shape[1]):
+            idx = np.argmax(seq_np[:, i])
+            seq_str += bases[idx]
+        sequence_strings.append(seq_str)
+    
+    # Extract motifs for each filter
+    motifs_per_filter = [[] for _ in range(n_filters)]
+    scores_per_filter = [[] for _ in range(n_filters)]
+    
+    for b, seq_str in enumerate(sequence_strings):
+        for f in range(n_filters):
+            # Find positions where this filter activates above threshold
+            filter_act = act[b, f].cpu().numpy()
+            high_act_pos = np.where(filter_act > threshold)[0]
             
-            plt.savefig(os.path.join(output_dir, f"filter_{filter_idx}_logo.png"), 
-                       dpi=300, bbox_inches='tight')
-            plt.close(fig)
+            # Extract subsequences at these positions
+            for pos in high_act_pos:
+                end_pos = pos + filter_length
+                if end_pos <= len(seq_str):
+                    motif = seq_str[pos:end_pos]
+                    score = float(filter_act[pos])
+                    
+                    motifs_per_filter[f].append(motif)
+                    scores_per_filter[f].append(score)
+    
+    if return_scores:
+        return motifs_per_filter, scores_per_filter
+    else:
+        return motifs_per_filter

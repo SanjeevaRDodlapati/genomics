@@ -1,272 +1,299 @@
 """
-Utility functions to convert models between UAVarPrior/FuGEP and GenomicLightning.
+Utilities for converting between different model formats.
+
+This module provides functions to convert models between different formats,
+such as PyTorch models to ONNX, TorchScript, or TensorFlow.
 """
 
-import torch
-import numpy as np
-import sys
 import os
-import importlib.util
+import torch
+import torch.nn as nn
+import numpy as np
 from typing import Dict, Any, Optional, Union, Tuple, List
+import logging
 
-from genomic_lightning.models.deepsea import DeepSEA
-from genomic_lightning.models.danq import DanQModel
-from genomic_lightning.models.chromdragonn import ChromDragoNNModel
+logger = logging.getLogger(__name__)
 
-
-def import_module_from_path(module_path: str, module_name: str = None):
-    """
-    Import a Python module from filesystem path.
-    
-    Args:
-        module_path: Path to Python module file
-        module_name: Name to give the imported module (defaults to filename)
-        
-    Returns:
-        Imported module object
-    """
-    if module_name is None:
-        module_name = os.path.basename(module_path).replace(".py", "")
-        
-    spec = importlib.util.spec_from_file_location(module_name, module_path)
-    if spec is None:
-        raise ImportError(f"Could not load spec for module {module_name} from {module_path}")
-        
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def find_fugep_model_class(fugep_path: str) -> Tuple[Any, str]:
-    """
-    Find the model class in a FuGEP installation.
-    
-    Args:
-        fugep_path: Path to FuGEP installation
-        
-    Returns:
-        Tuple of (model_class, model_name)
-    """
-    models_path = os.path.join(fugep_path, "fugep", "models")
-    if not os.path.isdir(models_path):
-        raise FileNotFoundError(f"FuGEP models directory not found at {models_path}")
-        
-    # Try to find DeepSEA model
-    deepsea_path = os.path.join(models_path, "deepsea.py")
-    if os.path.isfile(deepsea_path):
-        deepsea_module = import_module_from_path(deepsea_path)
-        model_classes = [obj for name, obj in deepsea_module.__dict__.items() 
-                        if isinstance(obj, type) and "deepsea" in name.lower()]
-        if model_classes:
-            return model_classes[0], "DeepSEA"
-            
-    # Try to find other models
-    model_files = [f for f in os.listdir(models_path) if f.endswith(".py")]
-    for model_file in model_files:
-        model_path = os.path.join(models_path, model_file)
-        model_module = import_module_from_path(model_path)
-        model_classes = [obj for name, obj in model_module.__dict__.items() 
-                        if isinstance(obj, type) and hasattr(obj, "forward")]
-                        
-        if model_classes:
-            model_name = model_file.replace(".py", "").title()
-            return model_classes[0], model_name
-            
-    raise ValueError(f"No model classes found in {models_path}")
-
-
-def find_uavarprior_model_class(uavarprior_path: str) -> Tuple[Any, str]:
-    """
-    Find the model class in a UAVarPrior installation.
-    
-    Args:
-        uavarprior_path: Path to UAVarPrior installation
-        
-    Returns:
-        Tuple of (model_class, model_name)
-    """
-    models_path = os.path.join(uavarprior_path, "uavarprior", "models")
-    if not os.path.isdir(models_path):
-        raise FileNotFoundError(f"UAVarPrior models directory not found at {models_path}")
-        
-    # Try to find DeepSEA model first
-    deepsea_path = os.path.join(models_path, "deepsea.py")
-    if os.path.isfile(deepsea_path):
-        deepsea_module = import_module_from_path(deepsea_path)
-        model_classes = [obj for name, obj in deepsea_module.__dict__.items() 
-                        if isinstance(obj, type) and "deepsea" in name.lower()]
-        if model_classes:
-            return model_classes[0], "DeepSEA"
-    
-    # Try to find other models
-    model_files = [f for f in os.listdir(models_path) if f.endswith(".py")]
-    for model_file in model_files:
-        model_path = os.path.join(models_path, model_file)
-        model_module = import_module_from_path(model_path)
-        model_classes = [obj for name, obj in model_module.__dict__.items() 
-                        if isinstance(obj, type) and hasattr(obj, "forward")]
-                        
-        if model_classes:
-            model_name = model_file.replace(".py", "").title()
-            return model_classes[0], model_name
-            
-    raise ValueError(f"No model classes found in {models_path}")
-
-
-def get_corresponding_genomic_lightning_model(legacy_model_name: str):
-    """
-    Get the corresponding GenomicLightning model class based on a legacy model name.
-    
-    Args:
-        legacy_model_name: Name of legacy model
-        
-    Returns:
-        GenomicLightning model class
-    """
-    # Map legacy model names to GenomicLightning models
-    model_map = {
-        "DeepSEA": DeepSEA,
-        "DanQ": DanQModel,
-        "ChromDragonn": ChromDragoNNModel,
-    }
-    
-    for model_key in model_map:
-        if model_key.lower() in legacy_model_name.lower():
-            return model_map[model_key]
-            
-    # Default to DeepSEA if no match found
-    print(f"WARNING: No direct GenomicLightning model match for {legacy_model_name}. Using DeepSEA as default.")
-    return DeepSEA
-
-
-def load_legacy_model_weights(
-    legacy_model_path: str,
-    target_model: torch.nn.Module,
-    mapping_dict: Optional[Dict[str, str]] = None
-) -> torch.nn.Module:
-    """
-    Load weights from a legacy model checkpoint into a GenomicLightning model.
-    
-    Args:
-        legacy_model_path: Path to legacy model checkpoint
-        target_model: GenomicLightning model to load weights into
-        mapping_dict: Dictionary mapping legacy parameter names to target names
-        
-    Returns:
-        Updated target model with loaded weights
-    """
-    # Load legacy checkpoint
-    checkpoint = torch.load(legacy_model_path, map_location="cpu")
-    
-    # Extract state dict (handle different formats)
-    if "state_dict" in checkpoint:
-        legacy_state_dict = checkpoint["state_dict"]
-    elif "model_state_dict" in checkpoint:
-        legacy_state_dict = checkpoint["model_state_dict"]
-    else:
-        # Assume checkpoint is the state dict itself
-        legacy_state_dict = checkpoint
-    
-    # Create mapping between legacy and target model parameters
-    if mapping_dict is None:
-        mapping_dict = {}
-        for legacy_name, _ in legacy_state_dict.items():
-            # Try to find a matching parameter in target model
-            target_name = legacy_name
-            if "module." in target_name:
-                target_name = target_name.replace("module.", "")
-                
-            if target_name in target_model.state_dict():
-                mapping_dict[legacy_name] = target_name
-    
-    # Create new state dict for target model
-    target_state_dict = target_model.state_dict()
-    loaded_params = 0
-    
-    for legacy_name, target_name in mapping_dict.items():
-        if legacy_name in legacy_state_dict and target_name in target_state_dict:
-            legacy_param = legacy_state_dict[legacy_name]
-            target_param_shape = target_state_dict[target_name].shape
-            
-            # Check if shapes match
-            if legacy_param.shape == target_param_shape:
-                target_state_dict[target_name] = legacy_param
-                loaded_params += 1
-            else:
-                print(f"WARNING: Shape mismatch for {legacy_name} -> {target_name}: "
-                     f"{legacy_param.shape} vs {target_param_shape}")
-    
-    # Load the updated state dict
-    target_model.load_state_dict(target_state_dict, strict=False)
-    
-    print(f"Loaded {loaded_params}/{len(target_state_dict)} parameters from legacy model")
-    return target_model
-
-
-def convert_model_to_genomic_lightning(
-    legacy_model_path: str,
-    legacy_code_path: str,
+def convert_to_onnx(
+    model: nn.Module,
     output_path: str,
-    sequence_length: int = 1000,
-    n_genomic_features: int = 4,
-    n_outputs: int = 919,
-    model_type: Optional[str] = None
+    input_shape: Tuple[int, ...] = (1, 4, 1000),
+    dynamic_axes: Optional[Dict[str, List[int]]] = None,
+    opset_version: int = 12,
+    input_names: Optional[List[str]] = None,
+    output_names: Optional[List[str]] = None
 ) -> str:
     """
-    Convert a legacy model from UAVarPrior/FuGEP to GenomicLightning format.
+    Convert a PyTorch model to ONNX format.
     
     Args:
-        legacy_model_path: Path to legacy model checkpoint
-        legacy_code_path: Path to legacy code installation
-        output_path: Path to save converted model
-        sequence_length: Length of input sequences
-        n_genomic_features: Number of genomic features
-        n_outputs: Number of output features
-        model_type: Override detected model type
+        model: PyTorch model to convert
+        output_path: Path to save the ONNX model
+        input_shape: Shape of the input tensor (batch_size, channels, seq_length)
+        dynamic_axes: Dictionary specifying dynamic axes for inputs/outputs
+        opset_version: ONNX opset version
+        input_names: Names for model inputs
+        output_names: Names for model outputs
         
     Returns:
-        Path to saved converted model
+        Path to the saved ONNX model
     """
-    # Find the legacy model class
-    try:
-        if "fugep" in legacy_code_path.lower():
-            LegacyModelClass, detected_model_name = find_fugep_model_class(legacy_code_path)
+    if not output_path.endswith(".onnx"):
+        output_path = output_path + ".onnx"
+    
+    # Set model to evaluation mode
+    model.eval()
+    
+    # Create dummy input
+    dummy_input = torch.randn(input_shape, requires_grad=True)
+    
+    # Set default input/output names if not provided
+    if input_names is None:
+        input_names = ["input"]
+    
+    if output_names is None:
+        output_names = ["output"]
+    
+    # Set default dynamic axes if not provided
+    if dynamic_axes is None:
+        dynamic_axes = {
+            "input": {0: "batch_size", 2: "seq_length"},
+            "output": {0: "batch_size"}
+        }
+    
+    # Export the model
+    torch.onnx.export(
+        model,                     # model being run
+        dummy_input,               # model input
+        output_path,               # where to save the model
+        export_params=True,        # store the trained parameter weights inside the model file
+        opset_version=opset_version,  # the ONNX version to export the model to
+        do_constant_folding=True,  # whether to execute constant folding for optimization
+        input_names=input_names,   # the model's input names
+        output_names=output_names, # the model's output names
+        dynamic_axes=dynamic_axes  # variable length axes
+    )
+    
+    logger.info(f"Model exported to ONNX format at: {output_path}")
+    return output_path
+
+
+def convert_to_torchscript(
+    model: nn.Module,
+    output_path: str,
+    method: str = "trace",
+    example_input: Optional[torch.Tensor] = None,
+    input_shape: Tuple[int, ...] = (1, 4, 1000)
+) -> str:
+    """
+    Convert a PyTorch model to TorchScript format.
+    
+    Args:
+        model: PyTorch model to convert
+        output_path: Path to save the TorchScript model
+        method: Conversion method ('trace' or 'script')
+        example_input: Example input tensor for tracing
+        input_shape: Shape of the input if example_input is not provided
+        
+    Returns:
+        Path to the saved TorchScript model
+    """
+    if not output_path.endswith(".pt") and not output_path.endswith(".pth"):
+        output_path = output_path + ".pt"
+    
+    # Set model to evaluation mode
+    model.eval()
+    
+    # Create scripted/traced model
+    if method.lower() == "trace":
+        # Create dummy input if not provided
+        if example_input is None:
+            example_input = torch.randn(input_shape)
+        
+        # Trace the model
+        ts_model = torch.jit.trace(model, example_input)
+    
+    elif method.lower() == "script":
+        # Script the model
+        ts_model = torch.jit.script(model)
+    
+    else:
+        raise ValueError(f"Unknown method: {method}. Must be 'trace' or 'script'")
+    
+    # Save the model
+    ts_model.save(output_path)
+    
+    logger.info(f"Model exported to TorchScript format at: {output_path}")
+    return output_path
+
+
+def optimize_for_mobile(
+    model: nn.Module,
+    output_path: str,
+    input_shape: Tuple[int, ...] = (1, 4, 1000)
+) -> str:
+    """
+    Optimize a PyTorch model for mobile deployment.
+    
+    Args:
+        model: PyTorch model to convert
+        output_path: Path to save the optimized model
+        input_shape: Shape of the input tensor
+        
+    Returns:
+        Path to the saved optimized model
+    """
+    if not output_path.endswith(".pt") and not output_path.endswith(".pth"):
+        output_path = output_path + ".pt"
+    
+    # Set model to evaluation mode
+    model.eval()
+    
+    # Create dummy input
+    example_input = torch.randn(input_shape)
+    
+    # Trace the model
+    traced_model = torch.jit.trace(model, example_input)
+    
+    # Optimize for mobile
+    from torch.utils.mobile_optimizer import optimize_for_mobile
+    optimized_model = optimize_for_mobile(traced_model)
+    
+    # Save the model
+    optimized_model.save(output_path)
+    
+    logger.info(f"Model optimized for mobile at: {output_path}")
+    return output_path
+
+
+def quantize_model(
+    model: nn.Module,
+    output_path: str,
+    quantization_type: str = "static",
+    input_shape: Tuple[int, ...] = (1, 4, 1000),
+    calibration_data: Optional[torch.Tensor] = None
+) -> str:
+    """
+    Quantize a PyTorch model for improved performance and reduced size.
+    
+    Args:
+        model: PyTorch model to quantize
+        output_path: Path to save the quantized model
+        quantization_type: Type of quantization ('static', 'dynamic', 'qat')
+        input_shape: Shape of the input tensor
+        calibration_data: Data for static quantization calibration
+        
+    Returns:
+        Path to the saved quantized model
+    """
+    if not output_path.endswith(".pt") and not output_path.endswith(".pth"):
+        output_path = output_path + ".pt"
+    
+    # Set model to evaluation mode
+    model.eval()
+    
+    if quantization_type.lower() == "dynamic":
+        # Apply dynamic quantization
+        quantized_model = torch.quantization.quantize_dynamic(
+            model, 
+            {nn.Linear, nn.Conv1d}, 
+            dtype=torch.qint8
+        )
+    
+    elif quantization_type.lower() == "static":
+        # Prepare model for static quantization
+        model_fp32 = model
+        
+        # Fuse modules where applicable
+        # Example: fuse Conv+BN+ReLU
+        for m in model_fp32.modules():
+            if hasattr(m, "fuse_model"):
+                m.fuse_model()
+        
+        # Prepare for static quantization
+        model_fp32.qconfig = torch.quantization.get_default_qconfig('fbgemm')
+        model_fp32_prepared = torch.quantization.prepare(model_fp32)
+        
+        # Calibrate with sample data
+        if calibration_data is not None:
+            with torch.no_grad():
+                for data in calibration_data:
+                    model_fp32_prepared(data)
         else:
-            LegacyModelClass, detected_model_name = find_uavarprior_model_class(legacy_code_path)
-    except Exception as e:
-        print(f"ERROR finding legacy model class: {e}")
-        if model_type is None:
-            raise ValueError(f"Could not detect legacy model type and no model_type provided")
-        detected_model_name = model_type
+            # Use random data if no calibration data is provided
+            dummy_input = torch.randn(input_shape)
+            with torch.no_grad():
+                model_fp32_prepared(dummy_input)
+        
+        # Convert to quantized model
+        quantized_model = torch.quantization.convert(model_fp32_prepared)
     
-    # Use provided model type or detected one
-    model_type = model_type or detected_model_name
+    elif quantization_type.lower() == "qat":
+        # Quantization-aware training
+        # This requires training the model with quantization awareness
+        raise NotImplementedError("Quantization-aware training requires model training and is not implemented in this function")
     
-    # Get corresponding GenomicLightning model
-    ModelClass = get_corresponding_genomic_lightning_model(model_type)
+    else:
+        raise ValueError(f"Unknown quantization type: {quantization_type}")
     
-    # Create the target model
-    target_model = ModelClass(
-        sequence_length=sequence_length,
-        n_genomic_features=n_genomic_features,
-        n_outputs=n_outputs
-    )
+    # Create TorchScript representation
+    quantized_script = torch.jit.script(quantized_model)
     
-    # Load weights from legacy model
-    target_model = load_legacy_model_weights(
-        legacy_model_path=legacy_model_path,
-        target_model=target_model
-    )
+    # Save the model
+    quantized_script.save(output_path)
     
-    # Save the converted model
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    torch.save({
-        "state_dict": target_model.state_dict(),
-        "model_type": model_type,
-        "original_path": legacy_model_path,
-        "sequence_length": sequence_length,
-        "n_genomic_features": n_genomic_features,
-        "n_outputs": n_outputs
-    }, output_path)
+    logger.info(f"Quantized model saved at: {output_path}")
+    return output_path
+
+
+def convert_lightning_to_pytorch(
+    lightning_model_path: str,
+    output_path: str,
+    model_only: bool = True
+) -> str:
+    """
+    Extract a PyTorch model from a PyTorch Lightning checkpoint.
     
+    Args:
+        lightning_model_path: Path to the Lightning checkpoint
+        output_path: Path to save the PyTorch model
+        model_only: Whether to extract only the model or the full Lightning module
+        
+    Returns:
+        Path to the saved PyTorch model
+    """
+    from pytorch_lightning import LightningModule
+    
+    if not os.path.exists(lightning_model_path):
+        raise FileNotFoundError(f"Lightning model not found: {lightning_model_path}")
+        
+    if not output_path.endswith(".pt") and not output_path.endswith(".pth"):
+        output_path = output_path + ".pt"
+    
+    # Load the Lightning model
+    checkpoint = torch.load(lightning_model_path, map_location=torch.device('cpu'))
+    
+    if model_only:
+        # Extract only the model state dict
+        if "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+            
+            # Remove Lightning module prefixes
+            cleaned_state_dict = {}
+            for key, value in state_dict.items():
+                if key.startswith("model."):
+                    # Remove 'model.' prefix
+                    cleaned_key = key[6:]
+                    cleaned_state_dict[cleaned_key] = value
+            
+            # Save just the model state dict
+            torch.save(cleaned_state_dict, output_path)
+            
+        else:
+            raise KeyError("Could not find 'state_dict' in the Lightning checkpoint")
+    else:
+        # Save the entire checkpoint
+        torch.save(checkpoint, output_path)
+    
+    logger.info(f"Model extracted from Lightning checkpoint and saved at: {output_path}")
     return output_path
